@@ -1,7 +1,6 @@
+const axios = require('axios');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 const https = require('https');
-const http  = require('http');
-const tls   = require('tls');
-const net   = require('net');
 
 const CONFIG = {
   EVENT_ID:      '161010371',
@@ -40,72 +39,24 @@ function sendTelegram(msg) {
 }
 
 function fetchMarketData() {
-  return new Promise((resolve, reject) => {
-    const postBody   = 'eventId=' + CONFIG.EVENT_ID + '&latestServerStamp=0';
-    const proxyAuth  = Buffer.from(CONFIG.PROXY.user + ':' + CONFIG.PROXY.pass).toString('base64');
-
-    // Step 1: TCP connect to proxy
-    const socket = net.connect(CONFIG.PROXY.port, CONFIG.PROXY.host, () => {
-      // Step 2: Send CONNECT
-      socket.write(
-        'CONNECT inv.viagogo.com:443 HTTP/1.1\r\n' +
-        'Host: inv.viagogo.com:443\r\n' +
-        'Proxy-Authorization: Basic ' + proxyAuth + '\r\n' +
-        '\r\n'
-      );
-    });
-
-    socket.on('error', reject);
-
-    let proxyResponse = '';
-    socket.on('data', (chunk) => {
-      proxyResponse += chunk.toString();
-      if (!proxyResponse.includes('\r\n\r\n')) return;
-
-      if (!proxyResponse.includes('200')) {
-        reject(new Error('Proxy CONNECT falhou: ' + proxyResponse.split('\r\n')[0]));
-        socket.destroy();
-        return;
-      }
-
-      // Step 3: TLS upgrade
-      const tlsSocket = tls.connect({
-        socket,
-        servername: 'inv.viagogo.com',
-        rejectUnauthorized: false,
-      }, () => {
-        // Step 4: Send HTTPS POST
-        const request =
-          'POST /Listings/MarketDataV3 HTTP/1.1\r\n' +
-          'Host: inv.viagogo.com\r\n' +
-          'Content-Type: application/x-www-form-urlencoded; charset=UTF-8\r\n' +
-          'Content-Length: ' + Buffer.byteLength(postBody) + '\r\n' +
-          'X-Requested-With: XMLHttpRequest\r\n' +
-          'Cookie: ' + CONFIG.COOKIE + '\r\n' +
-          'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36\r\n' +
-          'Referer: https://inv.viagogo.com/Listings\r\n' +
-          'Origin: https://inv.viagogo.com\r\n' +
-          'Connection: close\r\n' +
-          '\r\n' +
-          postBody;
-
-        tlsSocket.write(request);
-      });
-
-      let responseData = Buffer.alloc(0);
-      tlsSocket.on('data', chunk => {
-        responseData = Buffer.concat([responseData, chunk]);
-      });
-      tlsSocket.on('end', () => {
-        const response = responseData.toString();
-        const headerEnd = response.indexOf('\r\n\r\n');
-        if (headerEnd === -1) { resolve(response); return; }
-        const body = response.substring(headerEnd + 4);
-        resolve(body);
-      });
-      tlsSocket.on('error', reject);
-    });
-  });
+  const proxyUrl = 'http://' + CONFIG.PROXY.user + ':' + CONFIG.PROXY.pass + '@' + CONFIG.PROXY.host + ':' + CONFIG.PROXY.port;
+  const agent = new HttpsProxyAgent(proxyUrl);
+  return axios.post(
+    'https://inv.viagogo.com/Listings/MarketDataV3',
+    'eventId=' + CONFIG.EVENT_ID + '&latestServerStamp=0',
+    {
+      httpsAgent: agent,
+      headers: {
+        'Content-Type':     'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Cookie':           CONFIG.COOKIE,
+        'User-Agent':       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+        'Referer':          'https://inv.viagogo.com/Listings',
+        'Origin':           'https://inv.viagogo.com',
+      },
+      timeout: 30000,
+    }
+  ).then(r => r.data);
 }
 
 function parseSales(html) {
@@ -178,12 +129,12 @@ async function poll() {
   const nowStr = now.toLocaleTimeString('pt-PT');
   try {
     const html  = await fetchMarketData();
-    console.log('[Debug] length:', html.length, 'first 200:', html.substring(0,200).replace(/\n/g,' '));
+    console.log('[Debug] length:', html.length, '| start:', html.substring(0,100).replace(/\n/g,' '));
 
     const sales = parseSales(html);
 
     if (sales.length === 0 && html.length < 500) {
-      console.warn('[Monitor] Resposta suspeita.');
+      console.warn('[Monitor] Resposta suspeita:', html.substring(0,200));
       await sendTelegram('⚠️ <b>Aviso</b>: Resposta inválida. Sessão pode ter expirado.');
       return;
     }
@@ -237,6 +188,6 @@ async function poll() {
   }
 }
 
-console.log('[Monitor] A arrancar com proxy PT (TLS directo)...');
+console.log('[Monitor] A arrancar com axios + proxy PT...');
 poll();
 setInterval(poll, CONFIG.INTERVAL);
