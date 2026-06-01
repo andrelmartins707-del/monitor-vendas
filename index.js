@@ -48,43 +48,30 @@ function fetchMarketData() {
   return new Promise((resolve, reject) => {
     const postBody = 'eventId=' + CONFIG.EVENT_ID + '&latestServerStamp=0';
     const proxyAuth = Buffer.from(CONFIG.PROXY.user + ':' + CONFIG.PROXY.pass).toString('base64');
-
-    const tunnel = http.request({
+    const req = http.request({
       host: CONFIG.PROXY.host,
       port: CONFIG.PROXY.port,
-      method: 'CONNECT',
-      path: 'inv.viagogo.com:443',
-      headers: { 'Proxy-Authorization': 'Basic ' + proxyAuth }
+      method: 'POST',
+      path: 'https://inv.viagogo.com/Listings/MarketDataV3',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Content-Length': Buffer.byteLength(postBody),
+        'X-Requested-With': 'XMLHttpRequest',
+        'Cookie': CONFIG.COOKIE,
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+        'Referer': 'https://inv.viagogo.com/Listings',
+        'Origin': 'https://inv.viagogo.com',
+        'Proxy-Authorization': 'Basic ' + proxyAuth,
+        'Host': 'inv.viagogo.com',
+      }
+    }, r => {
+      let data = '';
+      r.on('data', chunk => data += chunk);
+      r.on('end', () => resolve(data));
     });
-
-    tunnel.on('connect', (res, socket) => {
-      const req = https.request({
-        host: 'inv.viagogo.com',
-        path: '/Listings/MarketDataV3',
-        method: 'POST',
-        socket: socket,
-        agent: false,
-        headers: {
-          'Content-Type':    'application/x-www-form-urlencoded; charset=UTF-8',
-          'Content-Length':  Buffer.byteLength(postBody),
-          'X-Requested-With':'XMLHttpRequest',
-          'Cookie':          CONFIG.COOKIE,
-          'User-Agent':      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-          'Referer':         'https://inv.viagogo.com/Listings',
-          'Origin':          'https://inv.viagogo.com',
-        }
-      }, r => {
-        let data = '';
-        r.on('data', chunk => data += chunk);
-        r.on('end', () => resolve(data));
-      });
-      req.on('error', reject);
-      req.write(postBody);
-      req.end();
-    });
-
-    tunnel.on('error', reject);
-    tunnel.end();
+    req.on('error', reject);
+    req.write(postBody);
+    req.end();
   });
 }
 
