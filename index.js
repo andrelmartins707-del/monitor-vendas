@@ -162,7 +162,7 @@ async function poll() {
   const nowStr = now.toLocaleTimeString('pt-PT');
   try {
     const html  = await fetchMarketData();
-    const sales = parseSales(html);
+    console.log('[Debug] HTML length:', html.length, '| First 500:', html.substring(0, 500));const sales = parseSales(html);
 
     if (sales.length === 0 && html.length < 500) {
       console.warn('[Monitor] Resposta suspeita:', html.substring(0,200));
