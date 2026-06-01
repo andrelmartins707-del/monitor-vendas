@@ -16,7 +16,7 @@ const CONFIG = {
   PROXY: {
     host: 'premium.flamingoproxies.com',
     port: 61236,
-    user: 'W52JQM5BIKSCVTE-country-pt-session-NihSUFTZkcVu',
+    user: 'W52JQM5BIKSCVTE-country-pt',
     pass: 'B93T43DFDANR75Y',
   }
 };
