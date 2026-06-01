@@ -1,14 +1,11 @@
 const https = require('https');
 const http  = require('http');
-
-// ============================================
-// Monitor de Vendas - Portugal vs Chile
-// Node.js para Railway / cloud 24/7 + proxy
-// ============================================
+const tls   = require('tls');
+const net   = require('net');
 
 const CONFIG = {
   EVENT_ID:      '161010371',
-  INTERVAL:      2 * 60 * 1000,
+  INTERVAL:      5 * 60 * 1000,
   TG_TOKEN:      '8966081803:AAF-79yIhvvbnENBAZuwAHLUEB1-LqW_3GI',
   TG_CHAT_ID:    '1019501940',
   INITIAL_STOCK: 4481,
@@ -27,7 +24,6 @@ let isFirst           = true;
 let checkCount        = 0;
 let lastDashboardHour = -1;
 
-// ---- Telegram ----
 function sendTelegram(msg) {
   return new Promise((resolve) => {
     const body = JSON.stringify({ chat_id: CONFIG.TG_CHAT_ID, text: msg, parse_mode: 'HTML' });
@@ -43,39 +39,75 @@ function sendTelegram(msg) {
   });
 }
 
-// ---- Request à Viagogo via proxy HTTPS CONNECT ----
 function fetchMarketData() {
   return new Promise((resolve, reject) => {
-    const postBody = 'eventId=' + CONFIG.EVENT_ID + '&latestServerStamp=0';
-    const proxyAuth = Buffer.from(CONFIG.PROXY.user + ':' + CONFIG.PROXY.pass).toString('base64');
-    const req = http.request({
-      host: CONFIG.PROXY.host,
-      port: CONFIG.PROXY.port,
-      method: 'POST',
-      path: 'https://inv.viagogo.com/Listings/MarketDataV3',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'Content-Length': Buffer.byteLength(postBody),
-        'X-Requested-With': 'XMLHttpRequest',
-        'Cookie': CONFIG.COOKIE,
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        'Referer': 'https://inv.viagogo.com/Listings',
-        'Origin': 'https://inv.viagogo.com',
-        'Proxy-Authorization': 'Basic ' + proxyAuth,
-        'Host': 'inv.viagogo.com',
-      }
-    }, r => {
-      let data = '';
-      r.on('data', chunk => data += chunk);
-      r.on('end', () => resolve(data));
+    const postBody   = 'eventId=' + CONFIG.EVENT_ID + '&latestServerStamp=0';
+    const proxyAuth  = Buffer.from(CONFIG.PROXY.user + ':' + CONFIG.PROXY.pass).toString('base64');
+
+    // Step 1: TCP connect to proxy
+    const socket = net.connect(CONFIG.PROXY.port, CONFIG.PROXY.host, () => {
+      // Step 2: Send CONNECT
+      socket.write(
+        'CONNECT inv.viagogo.com:443 HTTP/1.1\r\n' +
+        'Host: inv.viagogo.com:443\r\n' +
+        'Proxy-Authorization: Basic ' + proxyAuth + '\r\n' +
+        '\r\n'
+      );
     });
-    req.on('error', reject);
-    req.write(postBody);
-    req.end();
+
+    socket.on('error', reject);
+
+    let proxyResponse = '';
+    socket.on('data', (chunk) => {
+      proxyResponse += chunk.toString();
+      if (!proxyResponse.includes('\r\n\r\n')) return;
+
+      if (!proxyResponse.includes('200')) {
+        reject(new Error('Proxy CONNECT falhou: ' + proxyResponse.split('\r\n')[0]));
+        socket.destroy();
+        return;
+      }
+
+      // Step 3: TLS upgrade
+      const tlsSocket = tls.connect({
+        socket,
+        servername: 'inv.viagogo.com',
+        rejectUnauthorized: false,
+      }, () => {
+        // Step 4: Send HTTPS POST
+        const request =
+          'POST /Listings/MarketDataV3 HTTP/1.1\r\n' +
+          'Host: inv.viagogo.com\r\n' +
+          'Content-Type: application/x-www-form-urlencoded; charset=UTF-8\r\n' +
+          'Content-Length: ' + Buffer.byteLength(postBody) + '\r\n' +
+          'X-Requested-With: XMLHttpRequest\r\n' +
+          'Cookie: ' + CONFIG.COOKIE + '\r\n' +
+          'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36\r\n' +
+          'Referer: https://inv.viagogo.com/Listings\r\n' +
+          'Origin: https://inv.viagogo.com\r\n' +
+          'Connection: close\r\n' +
+          '\r\n' +
+          postBody;
+
+        tlsSocket.write(request);
+      });
+
+      let responseData = Buffer.alloc(0);
+      tlsSocket.on('data', chunk => {
+        responseData = Buffer.concat([responseData, chunk]);
+      });
+      tlsSocket.on('end', () => {
+        const response = responseData.toString();
+        const headerEnd = response.indexOf('\r\n\r\n');
+        if (headerEnd === -1) { resolve(response); return; }
+        const body = response.substring(headerEnd + 4);
+        resolve(body);
+      });
+      tlsSocket.on('error', reject);
+    });
   });
 }
 
-// ---- Parser HTML ----
 function parseSales(html) {
   const sales = [];
   const gridMatch = html.match(/id="marketTransactionsGrid"[\s\S]*?<\/div>\s*<\/div>/);
@@ -93,7 +125,7 @@ function parseSales(html) {
     const priceText = getText(tdMatches[5][1]);
     const price     = parseFloat(priceText.replace('€', ''));
     if (section && !isNaN(price)) {
-      sales.push({ section, row: rowNum, seats, qty: parseInt(qty) || 0, price, priceText });
+      sales.push({ section, row: rowNum, seats, qty: parseInt(qty)||0, price, priceText });
     }
   });
   return sales;
@@ -101,24 +133,22 @@ function parseSales(html) {
 
 function saleKey(s) { return s.section+'|'+s.row+'|'+s.seats+'|'+s.qty+'|'+s.priceText; }
 
-// ---- Estatísticas ----
 function getStats() {
-  const now      = new Date();
-  const last1h   = new Date(now - 3600000);
-  const last24h  = new Date(now - 86400000);
+  const now        = new Date();
+  const last1h     = new Date(now - 3600000);
+  const last24h    = new Date(now - 86400000);
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const qtyLast1h  = sessionSales.filter(s => s.ts >= last1h).reduce((a,s) => a+s.qty, 0);
   const qtyLast24h = sessionSales.filter(s => s.ts >= last24h).reduce((a,s) => a+s.qty, 0);
   const qtyToday   = sessionSales.filter(s => s.ts >= todayStart).reduce((a,s) => a+s.qty, 0);
   const sectorMap  = {};
-  sessionSales.forEach(s => { sectorMap[s.section] = (sectorMap[s.section]||0) + s.qty; });
+  sessionSales.forEach(s => { sectorMap[s.section] = (sectorMap[s.section]||0)+s.qty; });
   const topSector  = Object.entries(sectorMap).sort((a,b) => b[1]-a[1])[0];
   const totalSold  = sessionSales.reduce((a,s) => a+s.qty, 0);
   const estimated  = Math.round((CONFIG.INITIAL_STOCK - totalSold) / 100) * 100;
   return { qtyLast1h, qtyLast24h, qtyToday, topSector, estimated, totalSold };
 }
 
-// ---- Dashboard ----
 async function sendDashboard(label) {
   const now     = new Date();
   const s       = getStats();
@@ -142,17 +172,18 @@ async function sendDashboard(label) {
   console.log('[Monitor] Dashboard enviado — '+timeStr);
 }
 
-// ---- Poll principal ----
 async function poll() {
   checkCount++;
   const now    = new Date();
   const nowStr = now.toLocaleTimeString('pt-PT');
   try {
     const html  = await fetchMarketData();
-    console.log('[Debug] HTML length:', html.length, '| First 500:', html.substring(0, 500));const sales = parseSales(html);
+    console.log('[Debug] length:', html.length, 'first 200:', html.substring(0,200).replace(/\n/g,' '));
+
+    const sales = parseSales(html);
 
     if (sales.length === 0 && html.length < 500) {
-      console.warn('[Monitor] Resposta suspeita:', html.substring(0,200));
+      console.warn('[Monitor] Resposta suspeita.');
       await sendTelegram('⚠️ <b>Aviso</b>: Resposta inválida. Sessão pode ter expirado.');
       return;
     }
@@ -173,7 +204,7 @@ async function poll() {
         'Portugal vs Chile — '+nowStr+'\n'+
         'Baseline: '+sales.length+' transacções.\n'+
         'Stock referência: '+CONFIG.INITIAL_STOCK+' bilhetes\n'+
-        '✅ A correr 24/7 — check a cada 2 minutos'
+        '✅ A correr 24/7 — check a cada 5 minutos'
       );
       isFirst = false;
     } else if (newSales.length > 0) {
@@ -203,10 +234,9 @@ async function poll() {
 
   } catch(e) {
     console.error('[Monitor] Erro no check #'+checkCount+':', e.message);
-    await sendTelegram('❌ <b>Erro</b> no check #'+checkCount+': '+e.message);
   }
 }
 
-console.log('[Monitor] A arrancar com proxy PT...');
+console.log('[Monitor] A arrancar com proxy PT (TLS directo)...');
 poll();
 setInterval(poll, CONFIG.INTERVAL);
